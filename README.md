@@ -9,6 +9,8 @@ era バリアント「[ShinEraTenseiP](https://gitgud.io/bazzile/eramegaten_p)�
 > 非公式ツールです。ShinEraTenseiP の作者・開発者とは関係ありません。
 > 不具合や要望はこのリポジトリの Issues へお願いします（本体側には問い合わせないでください）。
 
+詳しい使い方は [Wiki](../../wiki) にあります（同期のしくみ、追加画像の取り込み、詳細設定、よくある質問など）。
+
 ## できること
 
 - **本体・口上の取得**：gitgud の [本体](https://gitgud.io/bazzile/eramegaten_p) と [口上まとめ](https://gitgud.io/bazzile/eramegatenpKOJO) から最新版を取得します。
