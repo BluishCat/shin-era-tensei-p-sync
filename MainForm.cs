@@ -7,12 +7,16 @@ class MainForm : Form
 {
     private static readonly string AppDirectory = AppContext.BaseDirectory;
     private static readonly string ConfigPath = Path.Combine(AppDirectory, "config.txt");
+    private const long MaxLogBytes = 2_000_000;
 
     private AppConfig _config = new();
     private string BodyDir => _config.BodyPath(AppDirectory);
     private string KojoDir => _config.KojoPath(AppDirectory);
     private string ExtraDir => _config.ExtraPath(AppDirectory);
     private string WorkDir => _config.WorkPath(AppDirectory);
+    private string TrashRoot => Path.Combine(WorkDir, "削除済み");
+    private string LogPath => Path.Combine(WorkDir, "同期アプリ_ログ.txt");
+    private bool _logStarted;
 
     private readonly TextBox _targetBox = new() { Dock = DockStyle.Fill };
     private readonly Button _browseButton = new() { Text = "参照...", AutoSize = true };
@@ -27,6 +31,8 @@ class MainForm : Form
     private readonly ComboBox _launchBox = new() { Width = 150, DropDownStyle = ComboBoxStyle.DropDown };
     private readonly Button _launchButton = new() { Text = "ゲームを起動", AutoSize = true };
     private readonly CheckBox _launchAfterCheck = new() { Text = "まとめて更新のあと起動", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly LinkLabel _trashLink = new() { Text = "同期で消したファイル（退避先）", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly LinkLabel _logLink = new() { Text = "ログ", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly LinkLabel _uploaderLink = new() { Text = "追加画像の配布元（アップローダー）", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly ProgressBar _progressBar = new() { Dock = DockStyle.Fill };
     private readonly TextBox _logBox = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false };
@@ -61,7 +67,7 @@ class MainForm : Form
         layout.SetColumnSpan(buttons, 3);
 
         var launch = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        launch.Controls.AddRange([_launchBox, _launchButton, _launchAfterCheck, _uploaderLink]);
+        launch.Controls.AddRange([_launchBox, _launchButton, _launchAfterCheck, _trashLink, _logLink, _uploaderLink]);
         layout.Controls.Add(launch, 0, 3);
         layout.SetColumnSpan(launch, 3);
 
@@ -83,6 +89,7 @@ class MainForm : Form
             c.Save(ConfigPath);
         }
         LoadConfigToUi();
+        RotateLog();
 
         _toolTip.SetToolTip(_targetBox, "ゲームの ShinEraTenseiP フォルダ。同期で本体＋口上＋追加ファイルと同じ中身になります（セーブや設定、直下のファイルはそのまま）");
         _toolTip.SetToolTip(_allButton, "本体と口上を gitgud から取得（差分だけ）→ ゲームフォルダへ同期、を一度に行います");
@@ -92,6 +99,8 @@ class MainForm : Form
         _toolTip.SetToolTip(_openExtraButton, "ゲームに上乗せするファイルを置く場所。中はゲームフォルダと同じ並び（Data\\resources\\… など）");
         _toolTip.SetToolTip(_kojoCheck, "口上（eramegatenpKOJO）を本体と一緒に入れます。外すと次の同期で口上のファイルは消えます");
         _toolTip.SetToolTip(_launchBox, "起動する exe（同期先の直下）");
+        _toolTip.SetToolTip(_trashLink, $"同期でゲームフォルダから消したファイルは、作業フォルダの「削除済み\\日時」に元の並びで退避します（直近 {FolderSync.TrashGenerations} 回分）");
+        _toolTip.SetToolTip(_logLink, "このウィンドウのログと同じ内容を残したファイル（作業フォルダの 同期アプリ_ログ.txt）を開きます");
 
         _kojoCheck.CheckedChanged += (_, _) => TrySaveSettings();
         _launchAfterCheck.CheckedChanged += (_, _) => TrySaveSettings();
@@ -106,6 +115,8 @@ class MainForm : Form
         _importButton.Click += async (_, _) => await ChooseAndImport();
         _openExtraButton.Click += (_, _) => { Directory.CreateDirectory(ExtraDir); OpenShell(ExtraDir); };
         _launchButton.Click += (_, _) => Launch();
+        _trashLink.LinkClicked += (_, _) => { Directory.CreateDirectory(TrashRoot); OpenShell(TrashRoot); };
+        _logLink.LinkClicked += (_, _) => { if (File.Exists(LogPath)) OpenShell(LogPath); else OpenShell(WorkDir); };
         _uploaderLink.LinkClicked += (_, _) => { if (AppConfig.IsWebUrl(_config.ExtraUrl)) OpenShell(_config.ExtraUrl); };
         DragEnter += (_, e) => { if (e.Data?.GetDataPresent(DataFormats.FileDrop) == true) e.Effect = DragDropEffects.Copy; };
         DragDrop += async (_, e) =>
@@ -381,7 +392,8 @@ class MainForm : Form
         {
             string sample = string.Join("\n", plan.DeleteFiles.Take(8).Select(r => "・" + r)) + (plan.DeleteFiles.Count > 8 ? $"\n…ほか {plan.DeleteFiles.Count - 8} 件（ログ参照）" : "");
             string question = $"{targetRoot}\n\nコピー {plan.Copies.Count} 件 / 削除 {plan.DeleteFiles.Count} 件 / フォルダ削除 {plan.DeleteDirs.Count} 件\n\n{sample}\n\n"
-                + "配布元から消えたファイルや、本体・口上・追加ファイルのどれにもないファイルです。\n残したいものは先に「追加ファイル」へ移すか、詳細設定の「触らない場所」に入れてください。\n\n実行しますか？";
+                + "配布元から消えたファイルや、本体・口上・追加ファイルのどれにもないファイルです。\n残したいものは先に「追加ファイル」へ移すか、詳細設定の「触らない場所」に入れてください。\n\n"
+                + $"消すファイルは次の場所に退避します（直近 {FolderSync.TrashGenerations} 回分）:\n{TrashRoot}\n\n実行しますか？";
             if (MessageBox.Show(this, question, "同期の確認", MessageBoxButtons.OKCancel, MessageBoxIcon.Question) != DialogResult.OK)
             {
                 Log("同期をやめました");
@@ -393,8 +405,10 @@ class MainForm : Form
         _progressBar.Value = 0;
         var progress = new Progress<int>(done => _progressBar.Value = Math.Min(done, _progressBar.Maximum));
         sw.Restart();
-        await Task.Run(() => FolderSync.Execute(plan, targetRoot, progress, Log));
+        string trashRoot = TrashRoot;
+        string? trashDir = await Task.Run(() => FolderSync.Execute(plan, targetRoot, trashRoot, progress, Log));
         Log($"同期が終わりました（{sw.Elapsed.TotalSeconds:0.0} 秒）");
+        if (trashDir != null) Log($"  消した {plan.DeleteFiles.Count} 件は退避しました: {trashDir}");
         return true;
     }
 
@@ -462,7 +476,21 @@ class MainForm : Form
 
     private static void OpenShell(string path) => Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
 
-    // バックグラウンド処理からも呼ばれるので UI スレッドに回す
+    // 起動時、ログが大きくなっていたら .old.txt に回す（前の .old.txt は消える）
+    private void RotateLog()
+    {
+        try
+        {
+            var info = new FileInfo(LogPath);
+            if (info.Exists && info.Length > MaxLogBytes) File.Move(LogPath, Path.ChangeExtension(LogPath, ".old.txt"), true);
+        }
+        catch (Exception)
+        {
+            // ログが回せなくても動作には関係ない
+        }
+    }
+
+    // バックグラウンド処理からも呼ばれるので UI スレッドに回す。ログファイルにも残す
     private void Log(string message)
     {
         if (InvokeRequired)
@@ -470,6 +498,22 @@ class MainForm : Form
             BeginInvoke(() => Log(message));
             return;
         }
-        _logBox.AppendText(message.Replace("\n", Environment.NewLine) + Environment.NewLine);
+        _logBox.AppendText(message.Replace("\r\n", "\n").Replace("\n", Environment.NewLine) + Environment.NewLine);
+        try
+        {
+            Directory.CreateDirectory(WorkDir);
+            var sb = new StringBuilder();
+            if (!_logStarted)
+            {
+                sb.Append($"\r\n===== {DateTime.Now:yyyy/MM/dd HH:mm:ss} 起動 =====\r\n");
+                _logStarted = true;
+            }
+            sb.Append($"{DateTime.Now:HH:mm:ss} ").Append(message.Replace("\r\n", "\n").TrimEnd('\n').Replace("\n", "\r\n         ")).Append("\r\n");
+            File.AppendAllText(LogPath, sb.ToString(), new UTF8Encoding(false));
+        }
+        catch (Exception)
+        {
+            // ログが書けなくても動作には関係ない
+        }
     }
 }

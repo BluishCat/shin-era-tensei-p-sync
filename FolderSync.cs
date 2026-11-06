@@ -12,6 +12,9 @@ record SyncPlan(
 
 static class FolderSync
 {
+    /// <summary>同期で消したファイルの退避を何回分残すか</summary>
+    public const int TrashGenerations = 10;
+
     public static SourceLayer BodyLayer(string root) => new("本体", root, rel => FirstPart(rel).Equals(".git", StringComparison.OrdinalIgnoreCase) ? null : rel);
 
     // 口上リポジトリの ERB\ はゲームの Data\ERB\ に、それ以外（KOJO_README.md など）はゲームフォルダ直下に入る
@@ -104,7 +107,10 @@ static class FolderSync
         }
     }
 
-    public static void Execute(SyncPlan plan, string targetRoot, IProgress<int> progress, Action<string> log)
+    /// <summary>
+    /// 同期を実行する。消すファイルは trashRoot\日時\ に元の並びで退避し（直近 TrashGenerations 回分を残す）、退避先を返す
+    /// </summary>
+    public static string? Execute(SyncPlan plan, string targetRoot, string trashRoot, IProgress<int> progress, Action<string> log)
     {
         int done = 0;
         foreach (var (src, rel) in plan.Copies)
@@ -122,11 +128,14 @@ static class FolderSync
             File.SetLastWriteTimeUtc(dest, File.GetLastWriteTimeUtc(src));
             if (++done % 200 == 0) progress.Report(done);
         }
+        string? trashDir = plan.DeleteFiles.Count > 0 ? NewTrashDir(trashRoot) : null;
         foreach (string rel in plan.DeleteFiles)
         {
             string path = Path.Combine(targetRoot, rel);
+            string to = Path.Combine(trashDir!, rel);
+            Directory.CreateDirectory(Path.GetDirectoryName(to)!);
             File.SetAttributes(path, FileAttributes.Normal);
-            File.Delete(path);
+            File.Move(path, to, overwrite: true); // 別ドライブならコピーしてから消える
             if (++done % 50 == 0) progress.Report(done);
         }
         foreach (string rel in plan.DeleteDirs)
@@ -137,6 +146,31 @@ static class FolderSync
             progress.Report(++done);
         }
         progress.Report(done);
+        if (trashDir != null) PruneTrash(trashRoot, log);
+        return trashDir;
+    }
+
+    private static string NewTrashDir(string trashRoot)
+    {
+        string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        string dir = Path.Combine(trashRoot, stamp);
+        for (int i = 2; Directory.Exists(dir); i++) dir = Path.Combine(trashRoot, $"{stamp}_{i}");
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    // 古い退避から消す（名前が日時なので並べ替えれば古い順になる）
+    private static void PruneTrash(string trashRoot, Action<string> log)
+    {
+        try
+        {
+            foreach (var old in Directory.GetDirectories(trashRoot).OrderByDescending(d => Path.GetFileName(d), StringComparer.Ordinal).Skip(TrashGenerations))
+                PathUtil.DeleteDirectoryForce(old);
+        }
+        catch (Exception ex)
+        {
+            log("  古い退避の削除に失敗しました（次回また試します）: " + ex.Message);
+        }
     }
 
     private enum FileDiff { Same, TimeOnly, Different }
