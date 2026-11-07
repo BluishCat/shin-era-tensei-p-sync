@@ -12,6 +12,8 @@ class ConfigDialog : Form
     private readonly TextBox _bodyDir = Box(), _kojoDir = Box(), _extraDir = Box(), _workDir = Box(), _gitPath = Box(), _extraUrl = Box();
     private readonly TextBox _noAction = new() { Dock = DockStyle.Fill, Multiline = true, ScrollBars = ScrollBars.Vertical, Height = 110, AcceptsReturn = true };
 
+    private readonly CheckBox _appUpdateCheck = new() { Text = "起動時にアプリの新しい版を確認する", AutoSize = true, Margin = new Padding(3, 5, 3, 3) };
+
     private static TextBox Box() => new() { Dock = DockStyle.Fill };
 
     public ConfigDialog(AppConfig config, string appDir, string configPath)
@@ -70,6 +72,7 @@ class ConfigDialog : Form
         Add("作業フォルダ", _workDir, "ログ（同期アプリ_ログ.txt）、同期で消したファイルの退避先（削除済み）、zip で取得するときの一時置き場（空なら「work」）。", Browse(_workDir));
         Add("git.exe の場所", _gitPath, "空なら自動で探します。git があると差分だけ取得（数秒〜）、無いと毎回 zip を丸ごと取得します。", Browse(_gitPath, file: true));
         Add("追加画像の配布元", _extraUrl, "メイン画面の「追加画像の配布元」リンクで開くページ。今の配布元（getuploader）は 2026/11/25 にサービス終了予定なので、移転したらここを新しい URL に変えてください。空ならリンクを出しません。");
+        Add("アプリの更新", _appUpdateCheck, "オンにすると、起動したときに GitHub でこのアプリの新しい版を確かめ、あれば更新内容を見せて更新するか聞きます。オフでも、メイン画面の「アプリの更新を確認」からいつでも確かめられます。");
         Add("触らない場所", _noAction, "同期でコピーも削除もしない場所（1行に1つ、同期先からの相対パス）。/ を含まない名前はどの階層でも一致し、* は任意の文字列。ゲームフォルダ直下のファイルは書かなくても消しません。");
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(8) };
@@ -123,6 +126,7 @@ class ConfigDialog : Form
         _workDir.Text = c.WorkDir;
         _gitPath.Text = c.GitPath;
         _extraUrl.Text = c.ExtraUrl;
+        _appUpdateCheck.Checked = c.AppUpdateCheck;
         _noAction.Text = string.Join(Environment.NewLine, c.NoActionFolders);
     }
 
@@ -139,6 +143,7 @@ class ConfigDialog : Form
         c.WorkDir = _workDir.Text.Trim();
         c.GitPath = _gitPath.Text.Trim();
         c.ExtraUrl = _extraUrl.Text.Trim();
+        c.AppUpdateCheck = _appUpdateCheck.Checked;
         c.NoActionFolders = _noAction.Lines.Select(l => l.Trim()).Where(l => l.Length > 0 && !l.StartsWith('#')).ToList();
         return c;
     }

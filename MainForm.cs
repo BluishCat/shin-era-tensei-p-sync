@@ -33,6 +33,9 @@ class MainForm : Form
     private readonly CheckBox _launchAfterCheck = new() { Text = "まとめて更新のあと起動", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly LinkLabel _trashLink = new() { Text = "同期で消したファイル（退避先）", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly LinkLabel _logLink = new() { Text = "ログ", AutoSize = true, Anchor = AnchorStyles.Left };
+    private readonly LinkLabel _appUpdateLink = new() { Text = $"アプリの更新を確認（v{AppUpdater.Current.ToString(3)}）", AutoSize = true, Anchor = AnchorStyles.Left };
+    private bool _busy;
+    private bool _checkingApp;
     private readonly LinkLabel _uploaderLink = new() { Text = "追加画像の配布元（アップローダー）", AutoSize = true, Anchor = AnchorStyles.Left };
     private readonly ProgressBar _progressBar = new() { Dock = DockStyle.Fill };
     private readonly TextBox _logBox = new() { Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false };
@@ -67,7 +70,7 @@ class MainForm : Form
         layout.SetColumnSpan(buttons, 3);
 
         var launch = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Fill };
-        launch.Controls.AddRange([_launchBox, _launchButton, _launchAfterCheck, _trashLink, _logLink, _uploaderLink]);
+        launch.Controls.AddRange([_launchBox, _launchButton, _launchAfterCheck, _trashLink, _logLink, _uploaderLink, _appUpdateLink]);
         layout.Controls.Add(launch, 0, 3);
         layout.SetColumnSpan(launch, 3);
 
@@ -127,7 +130,14 @@ class MainForm : Form
                 if (zips.Length > 0) await RunWithLock(() => ImportZips(zips));
             }
         };
+        _appUpdateLink.LinkClicked += async (_, _) => await CheckAppUpdate(manual: true);
+        _toolTip.SetToolTip(_appUpdateLink, "GitHub でこのアプリの新しい版を確かめます（" + AppUpdater.ReleasesUrl + "）");
         Shown += async (_, _) => await RefreshState();
+        Shown += async (_, _) =>
+        {
+            await AppUpdater.CleanupOld(Log);
+            if (_config.AppUpdateCheck) await CheckAppUpdate(manual: false);
+        };
     }
 
     private void LoadConfigToUi()
@@ -272,6 +282,8 @@ class MainForm : Form
 
     private void SetBusy(bool busy)
     {
+        _busy = busy;
+        _appUpdateLink.Enabled = !busy;
         foreach (Control c in new Control[] { _browseButton, _configButton, _allButton, _updateButton, _syncButton, _importButton, _kojoCheck, _launchButton, _launchBox, _launchAfterCheck })
             c.Enabled = !busy;
         _targetBox.ReadOnly = busy;
@@ -471,6 +483,80 @@ class MainForm : Form
         MessageBox.Show(this, $"ゲーム側にだけあるファイルのうち {errors.Count} 件を取り込めなかったため、同期をやめました。\n詳しくはログを見てください。",
             "取り込めませんでした", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         return null;
+    }
+
+    /// <summary>
+    /// アプリの新しい版を確かめ、あれば更新内容を見せて選んでもらう。manual なら「飛ばす」にした版も知らせ、最新のときもそう伝える
+    /// </summary>
+    private async Task CheckAppUpdate(bool manual)
+    {
+        if (_checkingApp) return;
+        _checkingApp = true;
+        try
+        {
+            AppRelease? release;
+            try
+            {
+                release = await AppUpdater.FindNewer();
+            }
+            catch (Exception ex)
+            {
+                Log("アプリの新しい版を確認できませんでした: " + ex.Message);
+                if (manual) MessageBox.Show(this, "アプリの新しい版を確認できませんでした。\n" + ex.Message, "アプリの更新", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            string current = "v" + AppUpdater.Current.ToString(3);
+            if (release == null)
+            {
+                if (manual)
+                {
+                    Log($"アプリは最新です（{current}）");
+                    MessageBox.Show(this, $"アプリは最新です（{current}）。", "アプリの更新", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                return;
+            }
+            if (!manual && release.Tag.Equals(_config.SkipAppVersion, StringComparison.OrdinalIgnoreCase))
+            {
+                Log($"アプリの新しい版 {release.Tag} があります（飛ばす版に設定済み。「アプリの更新を確認」から更新できます）");
+                return;
+            }
+            Log($"アプリの新しい版 {release.Tag} があります（今は {current}）");
+
+            // 更新や同期の途中で起動し直さないよう、終わるまで待ってから聞く
+            while (_busy) await Task.Delay(1000);
+            using var dialog = new AppUpdateDialog(release, AppUpdater.CanWriteAppDir());
+            dialog.ShowDialog(this);
+            switch (dialog.Result)
+            {
+                case AppUpdateDialog.Choice.Skip:
+                    TrySaveSettings();
+                    _config.SkipAppVersion = release.Tag;
+                    _config.Save(ConfigPath);
+                    Log($"{release.Tag} は飛ばします（「アプリの更新を確認」からはいつでも更新できます）");
+                    break;
+                case AppUpdateDialog.Choice.Update:
+                    bool installed = false;
+                    await RunWithLock(async () =>
+                    {
+                        await AppUpdater.Install(release, WorkDir, Log, DownloadProgress());
+                        installed = true;
+                    });
+                    if (installed)
+                    {
+                        TrySaveSettings();
+                        AppUpdater.Restart();
+                        Close();
+                    }
+                    break;
+                default:
+                    Log("アプリの更新はあとにします");
+                    break;
+            }
+        }
+        finally
+        {
+            _checkingApp = false;
+        }
     }
 
     private static List<string> RunningGames(string targetRoot)

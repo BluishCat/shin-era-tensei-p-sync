@@ -44,6 +44,10 @@ class AppConfig
     public string LaunchExe { get; set; } = DefaultLaunchExe;
     public bool LaunchAfterUpdate { get; set; } = false;
     public string ExtraUrl { get; set; } = DefaultExtraUrl;
+    // 起動時にアプリの新しい版を確かめる
+    public bool AppUpdateCheck { get; set; } = true;
+    // 「この版は飛ばす」を選んだ版（起動時の確認では知らせない）
+    public string SkipAppVersion { get; set; } = "";
     public List<string> NoActionFolders { get; set; } = [.. DefaultNoAction];
 
     private List<KeyValuePair<string, string>> _unknown = [];
@@ -65,6 +69,8 @@ class AppConfig
         ("LaunchExe", "「ゲームを起動」で起動する exe（同期先からの相対パス）と、まとめて更新のあとに起動するか"),
         ("LaunchAfterUpdate", null),
         ("ExtraUrl", "追加画像の配布元のページ（メイン画面のリンクで開く。空ならリンクを出さない）"),
+        ("AppUpdateCheck", "起動時にこのアプリの新しい版を確かめるか（true/false）と、「この版は飛ばす」にした版"),
+        ("SkipAppVersion", null),
     ];
 
     private static bool IsKnownKey(string key) => Layout.Any(l => l.Key == key);
@@ -132,6 +138,8 @@ class AppConfig
             case "LaunchExe": LaunchExe = value; break;
             case "LaunchAfterUpdate": LaunchAfterUpdate = value.Equals("true", StringComparison.OrdinalIgnoreCase); break;
             case "ExtraUrl": ExtraUrl = value; break;
+            case "AppUpdateCheck": AppUpdateCheck = !value.Equals("false", StringComparison.OrdinalIgnoreCase); break;
+            case "SkipAppVersion": SkipAppVersion = value; break;
             default: _unknown.Add(new(key, value)); break;
         }
     }
@@ -152,6 +160,8 @@ class AppConfig
         "LaunchExe" => LaunchExe,
         "LaunchAfterUpdate" => LaunchAfterUpdate ? "true" : "false",
         "ExtraUrl" => ExtraUrl,
+        "AppUpdateCheck" => AppUpdateCheck ? "true" : "false",
+        "SkipAppVersion" => SkipAppVersion,
         _ => "",
     };
 
