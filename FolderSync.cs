@@ -150,6 +150,41 @@ static class FolderSync
         return trashDir;
     }
 
+    /// <summary>
+    /// 同期で消すことになったファイルのうち、ゲームの Data\resources にあるもの（画像など）。
+    /// 昔ゲームフォルダに直接入れた追加画像や自作の画像のほか、配布元で削除・改名された古い公式画像のこともある
+    /// </summary>
+    public static List<string> GameOnlyResources(SyncPlan plan) =>
+        plan.DeleteFiles.Where(rel => rel.StartsWith(ResourcesPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+
+    private static readonly string ResourcesPrefix = Path.Combine("Data", "resources") + Path.DirectorySeparatorChar;
+
+    /// <summary>
+    /// ゲームフォルダのファイルを「追加ファイル」へ同じ並びでコピーする（ゲーム側はそのまま）。既にあるものは触らない
+    /// </summary>
+    public static (int Adopted, List<string> Errors) AdoptToExtra(IEnumerable<string> relPaths, string targetRoot, string extraRoot)
+    {
+        int adopted = 0;
+        var errors = new List<string>();
+        foreach (string rel in relPaths)
+        {
+            try
+            {
+                string dest = Path.Combine(extraRoot, rel);
+                if (File.Exists(dest)) continue;
+                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                File.Copy(Path.Combine(targetRoot, rel), dest); // 更新日時も引き継ぐので、次の比較では同じものになる
+                File.SetAttributes(dest, FileAttributes.Normal);
+                adopted++;
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"{rel}: {ex.Message}");
+            }
+        }
+        return (adopted, errors);
+    }
+
     private static string NewTrashDir(string trashRoot)
     {
         string stamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");

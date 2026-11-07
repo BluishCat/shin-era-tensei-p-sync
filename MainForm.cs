@@ -363,6 +363,19 @@ class MainForm : Form
         var sw = Stopwatch.StartNew();
         var plan = await Task.Run(() => FolderSync.CreatePlan(layers, targetRoot, protect));
 
+        // ゲームの Data\resources にだけある画像などは、消す前に「追加ファイル」へ取り込むか聞く
+        var gameOnly = FolderSync.GameOnlyResources(plan);
+        if (gameOnly.Count > 0)
+        {
+            bool? adopted = await AskAdoptGameOnly(gameOnly, targetRoot);
+            if (adopted == null) return false;
+            if (adopted == true)
+            {
+                sw.Restart();
+                plan = await Task.Run(() => FolderSync.CreatePlan(layers, targetRoot, protect));
+            }
+        }
+
         const int MaxLines = 300;
         var report = new StringBuilder();
         foreach (var (_, rel) in plan.Copies.Take(MaxLines)) report.AppendLine("コピー: " + rel);
@@ -407,9 +420,57 @@ class MainForm : Form
         sw.Restart();
         string trashRoot = TrashRoot;
         string? trashDir = await Task.Run(() => FolderSync.Execute(plan, targetRoot, trashRoot, progress, Log));
+        // 同期で Emuera.exe などが入った・名前が変わったときに、起動する exe の一覧を合わせる
+        RefreshLaunchList();
         Log($"同期が終わりました（{sw.Elapsed.TotalSeconds:0.0} 秒）");
         if (trashDir != null) Log($"  消した {plan.DeleteFiles.Count} 件は退避しました: {trashDir}");
         return true;
+    }
+
+    /// <summary>
+    /// ゲーム側にだけある Data\resources のファイルを、取り込んで残すか・同期で消すか・同期をやめるか聞く。
+    /// 取り込んだら true、消すなら false、やめる（または取り込みに失敗した）なら null
+    /// </summary>
+    private async Task<bool?> AskAdoptGameOnly(List<string> gameOnly, string targetRoot)
+    {
+        long bytes = gameOnly.Sum(rel => { try { return new FileInfo(Path.Combine(targetRoot, rel)).Length; } catch (Exception) { return 0L; } });
+        var folders = gameOnly.GroupBy(rel => Path.GetDirectoryName(rel) ?? "", StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase).ToList();
+        string sample = string.Join("\n", folders.Take(10).Select(g => $"・{g.Key}（{g.Count():#,0} 件）"))
+            + (folders.Count > 10 ? $"\n…ほか {folders.Count - 10} フォルダ" : "");
+        Log($"ゲームの Data\\resources にだけあるファイル {gameOnly.Count:#,0} 件（{PathUtil.FormatBytes(bytes)}）:\n"
+            + string.Join("\n", gameOnly.Take(300).Select(r => "  " + r)) + (gameOnly.Count > 300 ? $"\n  …ほか {gameOnly.Count - 300} 件" : ""));
+        var answer = MessageBox.Show(this,
+            $"ゲームの Data\\resources に、本体・口上・追加ファイルのどれにも無いファイルが {gameOnly.Count:#,0} 件（{PathUtil.FormatBytes(bytes)}）あります。\n\n{sample}\n\n"
+            + "昔ゲームフォルダに直接入れた追加画像や自作の画像のほか、配布元で削除・改名された古い公式画像のこともあります（一覧はログにあります）。\n\n"
+            + "「追加ファイル」に取り込んで残しますか？\n\n"
+            + "はい：取り込んで残す（次からは追加ファイルとして同期します）\n"
+            + "いいえ：同期で消す（work\\削除済み に退避します）\n"
+            + "キャンセル：同期をやめる",
+            "ゲーム側にだけあるファイル", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
+        if (answer == DialogResult.Cancel)
+        {
+            Log("同期をやめました");
+            return null;
+        }
+        if (answer == DialogResult.No)
+        {
+            Log($"ゲーム側にだけある {gameOnly.Count:#,0} 件は取り込まず、同期で消します（退避します）");
+            return false;
+        }
+
+        Directory.CreateDirectory(ExtraDir);
+        string extra = ExtraDir;
+        var sw = Stopwatch.StartNew();
+        var (adopted, errors) = await Task.Run(() => FolderSync.AdoptToExtra(gameOnly, targetRoot, extra));
+        Log($"ゲーム側にだけあった {adopted:#,0} 件を「追加ファイル」に取り込みました（{sw.Elapsed.TotalSeconds:0.0} 秒）");
+        if (errors.Count == 0) return true;
+
+        // 取り込めなかったものを同期で消してしまわないよう、ここで止める
+        Log($"取り込めなかったもの {errors.Count} 件:\n" + string.Join("\n", errors.Take(30).Select(e => "  " + e)));
+        MessageBox.Show(this, $"ゲーム側にだけあるファイルのうち {errors.Count} 件を取り込めなかったため、同期をやめました。\n詳しくはログを見てください。",
+            "取り込めませんでした", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        return null;
     }
 
     private static List<string> RunningGames(string targetRoot)
