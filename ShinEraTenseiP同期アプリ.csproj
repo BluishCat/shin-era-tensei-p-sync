@@ -8,7 +8,7 @@
     <Nullable>enable</Nullable>
     <RootNamespace>ShinEraTenseiP同期アプリ</RootNamespace>
     <AssemblyName>ShinEraTenseiP同期アプリ</AssemblyName>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
 
     <PublishSingleFile>true</PublishSingleFile>
     <SelfContained>false</SelfContained>
