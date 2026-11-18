@@ -7,6 +7,8 @@ class MainForm : Form
 {
     private static readonly string AppDirectory = AppContext.BaseDirectory;
     private static readonly string ConfigPath = Path.Combine(AppDirectory, "config.txt");
+    // 前回の同期でゲームへ配ったファイルの一覧（ゲーム側にだけあるファイルが、配布元で消えたものか直接置いたものかを見分ける）
+    private static readonly string DistributedPath = Path.Combine(AppDirectory, "同期アプリ_配布済み一覧.txt");
     private const long MaxLogBytes = 2_000_000;
 
     private AppConfig _config = new();
@@ -307,6 +309,15 @@ class MainForm : Form
         string? gitExe = GitClient.Find(_config.GitPath);
         if (gitExe == null && !string.IsNullOrWhiteSpace(_config.GitPath)) Log("指定された git.exe が見つかりません: " + _config.GitPath);
         if (gitExe == null) Log("git が見つからないので zip で丸ごと取得します（Git for Windows を入れると差分だけになり速くなります）");
+        // 一覧がまだ無ければ（この機能が入る前の版から更新したとき）、更新前の同期元＝前回ゲームへ配ったものとして作っておく
+        if (!File.Exists(DistributedPath) && Directory.Exists(Path.Combine(BodyDir, "Data")))
+        {
+            var layers = Layers();
+            var protect = new PathMatcher(_config.NoActionFolders);
+            var list = await Task.Run(() => FolderSync.DistributedFrom(layers, protect));
+            DistributedList.Save(DistributedPath, list);
+            Log($"前回ゲームへ配ったファイルの一覧を、更新前の本体・口上・追加ファイルから作りました（{list.Count:#,0} 件）");
+        }
         var targets = new List<(string Name, string Url, string Branch, string Dir)> { ("本体", _config.BodyUrl, _config.BodyBranch, BodyDir) };
         if (_config.UseKojo) targets.Add(("口上", _config.KojoUrl, _config.KojoBranch, KojoDir));
         foreach (var (name, url, branch, dir) in targets)
@@ -365,18 +376,18 @@ class MainForm : Form
                 "ゲーム起動中", MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             return false;
 
-        var layers = new List<SourceLayer> { FolderSync.BodyLayer(BodyDir) };
-        if (_config.UseKojo) layers.Add(FolderSync.KojoLayer(KojoDir));
         Directory.CreateDirectory(ExtraDir);
-        layers.Add(FolderSync.ExtraLayer(ExtraDir));
+        var layers = Layers();
         var protect = new PathMatcher(_config.NoActionFolders);
 
         Log("差分を確認中...");
         var sw = Stopwatch.StartNew();
+        // 一覧が無ければ今の同期元から作る（その場合、今回の更新で配布元が消したファイルも「直接置いたもの」として聞かれる）
+        var distributedBefore = DistributedList.Load(DistributedPath) ?? await Task.Run(() => FolderSync.DistributedFrom(layers, protect));
         var plan = await Task.Run(() => FolderSync.CreatePlan(layers, targetRoot, protect));
 
-        // ゲームの Data\resources にだけある画像などは、消す前に「追加ファイル」へ取り込むか聞く
-        var gameOnly = FolderSync.GameOnlyResources(plan);
+        // ゲームフォルダに直接置いたファイルと Data\resources の画像は、消す前に「追加ファイル」へ取り込むか聞く
+        var gameOnly = FolderSync.GameOnlyToAsk(plan, distributedBefore);
         if (gameOnly.Count > 0)
         {
             bool? adopted = await AskAdoptGameOnly(gameOnly, targetRoot);
@@ -409,6 +420,7 @@ class MainForm : Form
         if (total == 0)
         {
             Log("ゲームフォルダは最新です");
+            SaveDistributed(plan, targetRoot, distributedBefore);
             return true;
         }
 
@@ -432,6 +444,7 @@ class MainForm : Form
         sw.Restart();
         string trashRoot = TrashRoot;
         string? trashDir = await Task.Run(() => FolderSync.Execute(plan, targetRoot, trashRoot, progress, Log));
+        SaveDistributed(plan, targetRoot, distributedBefore);
         // 同期で Emuera.exe などが入った・名前が変わったときに、起動する exe の一覧を合わせる
         RefreshLaunchList();
         Log($"同期が終わりました（{sw.Elapsed.TotalSeconds:0.0} 秒）");
@@ -439,33 +452,50 @@ class MainForm : Form
         return true;
     }
 
-    /// <summary>
-    /// ゲーム側にだけある Data\resources のファイルを、取り込んで残すか・同期で消すか・同期をやめるか聞く。
-    /// 取り込んだら true、消すなら false、やめる（または取り込みに失敗した）なら null
-    /// </summary>
-    private async Task<bool?> AskAdoptGameOnly(List<string> gameOnly, string targetRoot)
+    private List<SourceLayer> Layers()
     {
-        long bytes = gameOnly.Sum(rel => { try { return new FileInfo(Path.Combine(targetRoot, rel)).Length; } catch (Exception) { return 0L; } });
-        var folders = gameOnly.GroupBy(rel => Path.GetDirectoryName(rel) ?? "", StringComparer.OrdinalIgnoreCase)
-            .OrderByDescending(g => g.Count()).ThenBy(g => g.Key, StringComparer.OrdinalIgnoreCase).ToList();
-        string sample = string.Join("\n", folders.Take(10).Select(g => $"・{g.Key}（{g.Count():#,0} 件）"))
-            + (folders.Count > 10 ? $"\n…ほか {folders.Count - 10} フォルダ" : "");
-        Log($"ゲームの Data\\resources にだけあるファイル {gameOnly.Count:#,0} 件（{PathUtil.FormatBytes(bytes)}）:\n"
-            + string.Join("\n", gameOnly.Take(300).Select(r => "  " + r)) + (gameOnly.Count > 300 ? $"\n  …ほか {gameOnly.Count - 300} 件" : ""));
-        var answer = MessageBox.Show(this,
-            $"ゲームの Data\\resources に、本体・口上・追加ファイルのどれにも無いファイルが {gameOnly.Count:#,0} 件（{PathUtil.FormatBytes(bytes)}）あります。\n\n{sample}\n\n"
-            + "昔ゲームフォルダに直接入れた追加画像や自作の画像のほか、配布元で削除・改名された古い公式画像のこともあります（一覧はログにあります）。\n\n"
-            + "「追加ファイル」に取り込んで残しますか？\n\n"
-            + "はい：取り込んで残す（次からは追加ファイルとして同期します）\n"
-            + "いいえ：同期で消す（work\\削除済み に退避します）\n"
-            + "キャンセル：同期をやめる",
-            "ゲーム側にだけあるファイル", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question, MessageBoxDefaultButton.Button1);
-        if (answer == DialogResult.Cancel)
+        var layers = new List<SourceLayer> { FolderSync.BodyLayer(BodyDir) };
+        if (_config.UseKojo) layers.Add(FolderSync.KojoLayer(KojoDir));
+        layers.Add(FolderSync.ExtraLayer(ExtraDir));
+        return layers;
+    }
+
+    // 今回配ったファイルを覚えておく。前回配ったもので消せずにゲーム側に残っているものも、次に消せるよう残す
+    private void SaveDistributed(SyncPlan plan, string targetRoot, HashSet<string> before)
+    {
+        try
         {
-            Log("同期をやめました");
-            return null;
+            var list = new HashSet<string>(plan.Distributed, StringComparer.OrdinalIgnoreCase);
+            list.UnionWith(before.Where(rel => File.Exists(Path.Combine(targetRoot, rel))));
+            DistributedList.Save(DistributedPath, list);
         }
-        if (answer == DialogResult.No)
+        catch (Exception ex)
+        {
+            Log("前回配ったファイルの一覧を保存できませんでした: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// ゲーム側にだけあるファイル（直接置いたものと Data\resources の画像）のうち、残すものを選んでもらい「追加ファイル」へ取り込む。
+    /// 取り込んだら true、全部消すなら false、やめる（または取り込みに失敗した）なら null
+    /// </summary>
+    private async Task<bool?> AskAdoptGameOnly(List<(string Rel, bool WasDistributed)> gameOnly, string targetRoot)
+    {
+        Log($"ゲーム側にだけあるファイル {gameOnly.Count:#,0} 件:\n"
+            + string.Join("\n", gameOnly.Take(300).Select(f => "  " + f.Rel + (f.WasDistributed ? "（配布元で消えたファイル）" : "")))
+            + (gameOnly.Count > 300 ? $"\n  …ほか {gameOnly.Count - 300} 件" : ""));
+        List<string> kept;
+        using (var dialog = new GameOnlyDialog(gameOnly, targetRoot))
+        {
+            if (dialog.ShowDialog(this) != DialogResult.OK)
+            {
+                Log("同期をやめました");
+                return null;
+            }
+            kept = dialog.Kept;
+        }
+        int trash = gameOnly.Count - kept.Count;
+        if (kept.Count == 0)
         {
             Log($"ゲーム側にだけある {gameOnly.Count:#,0} 件は取り込まず、同期で消します（退避します）");
             return false;
@@ -474,8 +504,9 @@ class MainForm : Form
         Directory.CreateDirectory(ExtraDir);
         string extra = ExtraDir;
         var sw = Stopwatch.StartNew();
-        var (adopted, errors) = await Task.Run(() => FolderSync.AdoptToExtra(gameOnly, targetRoot, extra));
-        Log($"ゲーム側にだけあった {adopted:#,0} 件を「追加ファイル」に取り込みました（{sw.Elapsed.TotalSeconds:0.0} 秒）");
+        var (adopted, errors) = await Task.Run(() => FolderSync.AdoptToExtra(kept, targetRoot, extra));
+        Log($"ゲーム側にだけあった {adopted:#,0} 件を「追加ファイル」に取り込みました（{sw.Elapsed.TotalSeconds:0.0} 秒）"
+            + (trash > 0 ? $"。残りの {trash:#,0} 件は同期で消します（退避します）" : ""));
         if (errors.Count == 0) return true;
 
         // 取り込めなかったものを同期で消してしまわないよう、ここで止める
