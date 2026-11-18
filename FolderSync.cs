@@ -8,7 +8,11 @@ record SyncPlan(
     List<(string Src, string Rel)> Touches,   // 中身は同じで日時だけ違う → 日時だけ合わせる（次回からの比較が速くなる）
     List<string> DeleteFiles,
     List<string> DeleteDirs,
-    List<string> Overrides);                  // 追加ファイルが本体・口上の同名ファイルを上書きしているもの
+    List<string> Overrides)                   // 追加ファイルが本体・口上の同名ファイルを上書きしているもの
+{
+    // 同期後にゲームへ配ってあるはずのファイル（直下を除く）。次の同期で「前回配ったもの」として使う
+    public HashSet<string> Distributed { get; init; } = new(StringComparer.OrdinalIgnoreCase);
+}
 
 static class FolderSync
 {
@@ -35,19 +39,8 @@ static class FolderSync
     /// </summary>
     public static SyncPlan CreatePlan(IReadOnlyList<SourceLayer> layers, string targetRoot, PathMatcher protect)
     {
-        var desired = new Dictionary<string, (string Src, string Layer)>(StringComparer.OrdinalIgnoreCase);
         var overrides = new List<string>();
-        foreach (var layer in layers)
-        {
-            if (!Directory.Exists(layer.Root)) continue;
-            foreach (string file in EnumerateFilesSkippingGit(layer.Root))
-            {
-                string? rel = layer.Map(Path.GetRelativePath(layer.Root, file));
-                if (rel == null || protect.IsProtected(rel)) continue;
-                if (desired.TryGetValue(rel, out var prev) && prev.Layer != layer.Name) overrides.Add($"{rel}（{prev.Layer}より{layer.Name}を優先）");
-                desired[rel] = (file, layer.Name);
-            }
-        }
+        var desired = Desired(layers, protect, overrides);
 
         var copies = new List<(string, string)>();
         var touches = new List<(string, string)>();
@@ -94,8 +87,34 @@ static class FolderSync
             Walk("");
             deleteDirs = walked.Where(d => !keepDirs.Contains(d) && !protect.MayContainProtected(d)).OrderByDescending(d => d.Length).ToList();
         }
-        return new SyncPlan(copies, touches, deleteFiles, deleteDirs, overrides);
+        return new SyncPlan(copies, touches, deleteFiles, deleteDirs, overrides) { Distributed = ToDistributed(desired.Keys) };
     }
+
+    // 同期後に同期先にあるべきファイル（相対パス → コピー元と層の名前）。後の層が優先
+    private static Dictionary<string, (string Src, string Layer)> Desired(IReadOnlyList<SourceLayer> layers, PathMatcher protect, List<string>? overrides)
+    {
+        var desired = new Dictionary<string, (string Src, string Layer)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var layer in layers)
+        {
+            if (!Directory.Exists(layer.Root)) continue;
+            foreach (string file in EnumerateFilesSkippingGit(layer.Root))
+            {
+                string? rel = layer.Map(Path.GetRelativePath(layer.Root, file));
+                if (rel == null || protect.IsProtected(rel)) continue;
+                if (overrides != null && desired.TryGetValue(rel, out var prev) && prev.Layer != layer.Name) overrides.Add($"{rel}（{prev.Layer}より{layer.Name}を優先）");
+                desired[rel] = (file, layer.Name);
+            }
+        }
+        return desired;
+    }
+
+    // 直下のファイルは元から消さないので、一覧には入れない
+    private static HashSet<string> ToDistributed(IEnumerable<string> rels) =>
+        new(rels.Where(rel => Path.GetDirectoryName(rel) is { Length: > 0 }), StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>今の同期元から「配ってあるはずのファイル」を作る（前回の一覧が無いとき用）</summary>
+    public static HashSet<string> DistributedFrom(IReadOnlyList<SourceLayer> layers, PathMatcher protect) =>
+        ToDistributed(Desired(layers, protect, null).Keys);
 
     private static IEnumerable<string> EnumerateFilesSkippingGit(string root)
     {
@@ -151,11 +170,16 @@ static class FolderSync
     }
 
     /// <summary>
-    /// 同期で消すことになったファイルのうち、ゲームの Data\resources にあるもの（画像など）。
-    /// 昔ゲームフォルダに直接入れた追加画像や自作の画像のほか、配布元で削除・改名された古い公式画像のこともある
+    /// 同期で消すことになったファイルのうち、消す前に残すか聞くもの（WasDistributed は前回配ったものか）。
+    /// ・前回配っていないもの：ゲームフォルダに直接置いたファイル（自作の画像・BGM・改造ファイルなど）
+    /// ・Data\resources のもの：前回配ったもの（配布元で削除・改名された古い公式画像）も、画像なので残せるよう聞く
+    /// 前回配った ERB・CSV など（配布元で削除・改名されたもの）は聞かずに消す。残ると二重定義などでゲームが動かなくなるため
     /// </summary>
-    public static List<string> GameOnlyResources(SyncPlan plan) =>
-        plan.DeleteFiles.Where(rel => rel.StartsWith(ResourcesPrefix, StringComparison.OrdinalIgnoreCase)).ToList();
+    public static List<(string Rel, bool WasDistributed)> GameOnlyToAsk(SyncPlan plan, HashSet<string> distributedBefore) =>
+        plan.DeleteFiles
+            .Where(rel => rel.StartsWith(ResourcesPrefix, StringComparison.OrdinalIgnoreCase) || !distributedBefore.Contains(rel))
+            .Select(rel => (rel, distributedBefore.Contains(rel)))
+            .ToList();
 
     private static readonly string ResourcesPrefix = Path.Combine("Data", "resources") + Path.DirectorySeparatorChar;
 
